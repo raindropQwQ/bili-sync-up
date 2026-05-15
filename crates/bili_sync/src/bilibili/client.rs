@@ -423,7 +423,13 @@ impl BiliClient {
             ("tids", "0"),          // 不限分区
         ];
 
-        let response = self.request(Method::GET, url).await.query(&params).send().await?;
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .header(header::REFERER, "https://search.bilibili.com/")
+            .query(&params)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             // 旧搜索接口在部分环境会返回 412，回退到 all/v2 接口以保证可用性
@@ -489,6 +495,7 @@ impl BiliClient {
         let response = self
             .request(Method::GET, url)
             .await
+            .header(header::REFERER, "https://search.bilibili.com/")
             .query(&signed_params)
             .send()
             .await?;
@@ -552,7 +559,13 @@ impl BiliClient {
             ("page_size", &page_size.to_string()),
         ];
 
-        let response = self.request(Method::GET, url).await.query(&params).send().await?;
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .header(header::REFERER, "https://search.bilibili.com/")
+            .query(&params)
+            .send()
+            .await?;
         if !response.status().is_success() {
             return Err(anyhow!("all/v2 搜索请求失败: {}", response.status()));
         }
