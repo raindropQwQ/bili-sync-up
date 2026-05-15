@@ -172,6 +172,43 @@ impl Default for Client {
     }
 }
 
+fn response_body_preview(text: &str) -> String {
+    text.chars()
+        .take(200)
+        .collect::<String>()
+        .replace('\r', " ")
+        .replace('\n', " ")
+}
+
+async fn decode_json_response<T>(response: reqwest::Response, operation: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    let body = response.text().await.with_context(|| {
+        format!(
+            "读取{}响应体失败: status={}, content-type={}",
+            operation, status, content_type
+        )
+    })?;
+
+    serde_json::from_str(&body).with_context(|| {
+        format!(
+            "{}响应不是有效 JSON: status={}, content-type={}, body_prefix={}",
+            operation,
+            status,
+            content_type,
+            response_body_preview(&body)
+        )
+    })
+}
+
 #[derive(Clone)]
 pub struct BiliClient {
     pub client: Client,
@@ -370,7 +407,16 @@ impl BiliClient {
             return Err(anyhow!("搜索请求失败: {}", response.status()));
         }
 
-        let search_response: SearchResponse = response.json().await?;
+        let search_response: SearchResponse = match decode_json_response(response, "搜索").await {
+            Ok(search_response) => search_response,
+            Err(err) => {
+                warn!("旧搜索接口响应解析失败，回退到 all/v2 搜索接口: {:#}", err);
+                return self
+                    .search_via_all_v2(keyword, search_type, page, page_size)
+                    .await
+                    .with_context(|| format!("旧搜索接口响应解析失败且 all/v2 回退失败: {:#}", err));
+            }
+        };
 
         if search_response.code != 0 {
             return Err(anyhow!("搜索API返回错误: {}", search_response.message));
@@ -432,7 +478,7 @@ impl BiliClient {
             return Err(anyhow!("all/v2 搜索请求失败: {}", response.status()));
         }
 
-        let payload = response.json::<serde_json::Value>().await?;
+        let payload: serde_json::Value = decode_json_response(response, "all/v2 搜索").await?;
         let code = payload["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = payload["message"].as_str().unwrap_or("unknown");
