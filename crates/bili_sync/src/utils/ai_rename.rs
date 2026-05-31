@@ -413,6 +413,14 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    mode: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -429,11 +437,16 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: ChatMessageResponse,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ChatMessageResponse {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 /// 重命名同目录下的侧车文件（nfo/xml/srt/jpg/jpeg/png/ass等）
@@ -879,6 +892,7 @@ async fn ai_generate_filenames_batch_openai(
         messages,
         max_tokens: Some(512), // 批量需要更多 token
         temperature: Some(0.1),
+        thinking: deepseek_thinking_override(cfg),
     };
 
     let client = Client::builder()
@@ -900,11 +914,7 @@ async fn ai_generate_filenames_batch_openai(
     }
 
     let resp: ChatResponse = res.json().await?;
-    let raw = resp
-        .choices
-        .first()
-        .map(|c| c.message.content.trim().to_string())
-        .ok_or_else(|| anyhow!("No response"))?;
+    let raw = extract_chat_content(&resp)?;
 
     // 保存简化的对话历史（只保存生成的文件名列表，作为命名风格参考）
     // 不保存完整的 prompt（太长），只保存一个简短的用户消息和生成的文件名
@@ -923,6 +933,46 @@ async fn ai_generate_filenames_batch_openai(
     }
 
     parse_batch_response(&raw, expected_count)
+}
+
+fn deepseek_thinking_override(cfg: &AiRenameConfig) -> Option<ThinkingConfig> {
+    let provider = cfg.provider.as_str();
+    let base_url = cfg.base_url.to_ascii_lowercase();
+    if provider == "deepseek" || base_url.contains("api.deepseek.com") {
+        Some(ThinkingConfig {
+            mode: "disabled".to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+fn extract_chat_content(resp: &ChatResponse) -> Result<String> {
+    let choice = resp.choices.first().ok_or_else(|| anyhow!("AI 响应缺少 choices"))?;
+    let content = choice.message.content.as_deref().unwrap_or("").trim();
+    if !content.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    let finish_reason = choice.finish_reason.as_deref().unwrap_or("unknown");
+    let reasoning_len = choice
+        .message
+        .reasoning_content
+        .as_deref()
+        .map(|content| content.chars().count())
+        .unwrap_or(0);
+    if reasoning_len > 0 {
+        return Err(anyhow!(
+            "AI 返回最终内容为空: finish_reason={}, reasoning_content_len={}；模型只返回了推理内容，没有返回文件名 JSON 数组",
+            finish_reason,
+            reasoning_len
+        ));
+    }
+
+    Err(anyhow!(
+        "AI 返回最终内容为空: finish_reason={}；请重试或检查模型是否可用",
+        finish_reason
+    ))
 }
 
 /// 解析批量响应的 JSON 数组
@@ -967,6 +1017,9 @@ fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::parse_batch_response;
+    use super::{
+        deepseek_thinking_override, extract_chat_content, AiRenameConfig, ChatMessageResponse, ChatResponse, Choice,
+    };
 
     #[test]
     fn parse_batch_response_accepts_json_array() {
@@ -982,6 +1035,50 @@ mod tests {
             .expect_err("truncated json array should stay invalid");
 
         assert!(err.to_string().contains("解析 JSON 数组失败"));
+    }
+
+    #[test]
+    fn deepseek_paid_api_disables_thinking_for_filename_tasks() {
+        let cfg = AiRenameConfig {
+            enabled: true,
+            provider: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            ..Default::default()
+        };
+
+        let thinking = deepseek_thinking_override(&cfg).expect("deepseek provider should disable thinking");
+        assert_eq!(thinking.mode, "disabled");
+    }
+
+    #[test]
+    fn custom_provider_does_not_send_deepseek_thinking_field() {
+        let cfg = AiRenameConfig {
+            enabled: true,
+            provider: "custom".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            ..Default::default()
+        };
+
+        assert!(deepseek_thinking_override(&cfg).is_none());
+    }
+
+    #[test]
+    fn extract_chat_content_reports_reasoning_only_response() {
+        let resp = ChatResponse {
+            choices: vec![Choice {
+                message: ChatMessageResponse {
+                    content: Some(String::new()),
+                    reasoning_content: Some("thinking".to_string()),
+                },
+                finish_reason: Some("length".to_string()),
+            }],
+        };
+
+        let err = extract_chat_content(&resp).expect_err("empty final content should fail clearly");
+        let message = err.to_string();
+        assert!(message.contains("最终内容为空"));
+        assert!(message.contains("reasoning_content_len=8"));
+        assert!(message.contains("finish_reason=length"));
     }
 }
 
