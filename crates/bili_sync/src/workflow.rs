@@ -6835,6 +6835,7 @@ async fn download_page(
     };
 
     let mut chapter_primary_path: Option<PathBuf> = None;
+    let should_write_chapter_sidecars = !(audio_only && video_source.audio_only_m4a_only());
     if video_source.split_chapters_after_download()
         && is_single_page
         && !is_charge_video_locked(video_model)
@@ -6845,14 +6846,18 @@ async fn download_page(
         let bili_video = Video::new(bili_client, video_model.bvid.clone());
         match split_page_chapters_after_download(&bili_video, &page_info, &video_path, token.clone()).await {
             Ok(Some(outcome)) if !outcome.files.is_empty() => {
-                match write_chapter_sidecars(
-                    video_model,
-                    &outcome.files,
-                    &poster_path_for_chapters,
-                    fanart_path_for_chapters.as_deref(),
-                )
-                .await
-                {
+                let sidecar_result = if should_write_chapter_sidecars {
+                    write_chapter_sidecars(
+                        video_model,
+                        &outcome.files,
+                        &poster_path_for_chapters,
+                        fanart_path_for_chapters.as_deref(),
+                    )
+                    .await
+                } else {
+                    Ok(())
+                };
+                match sidecar_result {
                     Ok(_) => {
                         match sync_chapter_pages_after_split(connection, video_model, &page_model, &outcome).await {
                             Ok(_) => {
