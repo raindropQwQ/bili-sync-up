@@ -3713,6 +3713,10 @@ pub async fn download_video_pages(
     let first_char = normalize_upper_face_bucket(&upper_name);
     let base_upper_path = &current_config.upper_path.join(&first_char).join(&upper_name);
     let is_single_page = final_video_model.single_page.context("single_page is null")?;
+    let multi_page_like_use_season_structure = season_folder.is_some()
+        && ((!is_single_page && current_config.multi_page_use_season_structure) || split_chapters_use_season_structure);
+    let collection_use_root_season_structure =
+        is_collection && collection_use_season_structure && season_folder.is_some();
 
     // 预先计算本轮应使用的 video.path。
     // 正常成功路径交给最终的 update_videos_model 一次性写回；
@@ -3723,10 +3727,7 @@ pub async fn download_video_pages(
         } else {
             base_path.to_string_lossy().to_string()
         }
-    } else if (!is_single_page && current_config.multi_page_use_season_structure && season_folder.is_some())
-        || (split_chapters_use_season_structure && season_folder.is_some())
-        || (is_collection && collection_use_season_structure && season_folder.is_some())
-    {
+    } else if multi_page_like_use_season_structure || collection_use_root_season_structure {
         // 对于多P视频或合集使用Season结构时，保存根目录路径而不是Season子文件夹路径
         base_path
             .parent()
@@ -3738,8 +3739,8 @@ pub async fn download_video_pages(
     let path_changed = !path_to_save.is_empty() && final_video_model.path != path_to_save;
 
     // 为多P视频生成目录级 sidecar 文件名前缀
-    let video_base_name = if !is_single_page {
-        // 多P视频启用Season结构时，使用视频根目录的文件夹名作为系列级封面的文件名
+    let video_base_name = if !is_single_page || split_chapters_use_season_structure {
+        // 多P视频/分章Season结构启用时，使用视频根目录的文件夹名作为系列级封面的文件名
         let config = crate::config::reload_config();
         if config.multi_page_use_season_structure && season_folder.is_some() {
             let is_up_seasonal_submission_multipage = matches!(video_source, VideoSourceEnum::Submission(_))
@@ -3876,9 +3877,10 @@ pub async fn download_video_pages(
 
     // 平铺目录模式下（番剧/合集/多P），跳过 TVShow/Season 目录结构相关的元数据文件
     // - 不下载：tvshow.nfo、poster.jpg、folder.jpg、Season01-*.jpg、*-thumb.jpg、*-fanart.jpg
-    let disable_tvshow_assets = flat_folder && (is_bangumi || is_collection || !is_single_page);
+    let m4a_only_mode = video_source.audio_only() && video_source.audio_only_m4a_only();
+    let disable_tvshow_assets = m4a_only_mode || (flat_folder && (is_bangumi || is_collection || !is_single_page));
     if disable_tvshow_assets {
-        debug!("平铺目录模式：已启用跳过TVShow/Season元数据下载");
+        debug!("平铺目录或仅保留M4A模式：已启用跳过TVShow/Season元数据下载");
     }
 
     // 为番剧判断是否下载元数据（依赖数据库状态，不检查文件存在性）
@@ -3905,9 +3907,7 @@ pub async fn download_video_pages(
         if disable_tvshow_assets {
             false
         } else {
-            let config = crate::config::reload_config();
-            let uses_season_structure = (is_collection && collection_use_season_structure)
-                || (!is_single_page && config.multi_page_use_season_structure);
+            let uses_season_structure = collection_use_root_season_structure || multi_page_like_use_season_structure;
 
             if uses_season_structure && season_folder.is_some() {
                 // 对于合集，只有第一个视频才下载合集封面
@@ -3993,8 +3993,7 @@ pub async fn download_video_pages(
         true // 番剧不在此处检查
     };
 
-    let multi_page_use_season_nfo_route =
-        !is_single_page && season_folder.is_some() && crate::config::reload_config().multi_page_use_season_structure;
+    let multi_page_use_season_nfo_route = multi_page_like_use_season_structure;
     let submission_up_seasonal_nfo_route = matches!(video_source, VideoSourceEnum::Submission(_))
         && !is_submission_collection_video
         && !is_single_page
@@ -4007,9 +4006,16 @@ pub async fn download_video_pages(
     let should_backfill_collection_root_assets =
         if !disable_tvshow_assets && season_folder.is_some() && collection_like_nfo_route {
             let root_dir = base_path.parent().unwrap_or(&base_path);
+            let root_named_asset_missing = if video_base_name.trim().is_empty() {
+                false
+            } else {
+                !root_dir.join(format!("{}-thumb.jpg", video_base_name)).exists()
+                    || !root_dir.join(format!("{}-fanart.jpg", video_base_name)).exists()
+            };
             !root_dir.join("tvshow.nfo").exists()
                 || !root_dir.join("poster.jpg").exists()
                 || !root_dir.join("folder.jpg").exists()
+                || root_named_asset_missing
         } else {
             false
         };
@@ -4070,14 +4076,16 @@ pub async fn download_video_pages(
                 false
             }
         } else {
-            // 普通视频：为多P视频生成nfo
-            should_run_video_nfo && !is_single_page && !disable_tvshow_assets
+            // 普通视频：为多P视频或分章Season结构生成nfo
+            should_run_video_nfo && (!is_single_page || split_chapters_use_season_structure) && !disable_tvshow_assets
         };
 
-        let should_generate_collection_tvshow_nfo = should_generate_nfo && collection_like_nfo_route;
+        let should_generate_collection_tvshow_nfo = collection_like_nfo_route
+            && !disable_tvshow_assets
+            && (should_generate_nfo || should_backfill_collection_root_assets);
         let should_generate_collection_season_nfo = collection_like_nfo_route
             && !disable_tvshow_assets
-            && should_run_video_nfo
+            && (should_run_video_nfo || should_backfill_collection_season_nfo)
             && ((is_collection && collection_use_season_structure)
                 || submission_up_seasonal_nfo_route
                 || multi_page_use_season_nfo_route)
@@ -4323,11 +4331,7 @@ pub async fn download_video_pages(
                 season_uniqueid_override.as_deref(),
                 if let Some(ref bangumi_path) = bangumi_folder_path {
                     // 多P视频或合集使用Season结构时，tvshow.nfo放在视频根目录
-                    let config = crate::config::reload_config();
-                    if ((!is_single_page && config.multi_page_use_season_structure)
-                        || (is_collection && collection_use_season_structure))
-                        && season_folder.is_some()
-                    {
+                    if multi_page_like_use_season_structure || collection_use_root_season_structure {
                         bangumi_path.join("tvshow.nfo")
                     } else {
                         // 不使用Season结构时，保持原有逻辑
@@ -4335,11 +4339,7 @@ pub async fn download_video_pages(
                     }
                 } else {
                     // 多P视频或合集使用Season结构时，tvshow.nfo放在视频根目录
-                    let config = crate::config::reload_config();
-                    if ((!is_single_page && config.multi_page_use_season_structure)
-                        || (is_collection && collection_use_season_structure))
-                        && season_folder.is_some()
-                    {
+                    if multi_page_like_use_season_structure || collection_use_root_season_structure {
                         // 需要从base_path（Season文件夹）回到父目录（视频根目录）
                         base_path
                             .parent()
@@ -4372,11 +4372,7 @@ pub async fn download_video_pages(
                         bangumi_path.join("tvshow.nfo")
                     } else {
                         // 多P视频或合集使用Season结构时，tvshow.nfo放在视频根目录
-                        let config = crate::config::reload_config();
-                        if ((!is_single_page && config.multi_page_use_season_structure)
-                            || (is_collection && collection_use_season_structure))
-                            && season_folder.is_some()
-                        {
+                        if multi_page_like_use_season_structure || collection_use_root_season_structure {
                             bangumi_path.join("tvshow.nfo")
                         } else {
                             // 不使用Season结构时，保持原有逻辑
@@ -4385,11 +4381,7 @@ pub async fn download_video_pages(
                     }
                 } else {
                     // 多P视频或合集使用Season结构时，tvshow.nfo放在视频根目录
-                    let config = crate::config::reload_config();
-                    if ((!is_single_page && config.multi_page_use_season_structure)
-                        || (is_collection && collection_use_season_structure))
-                        && season_folder.is_some()
-                    {
+                    if multi_page_like_use_season_structure || collection_use_root_season_structure {
                         // 需要从base_path（Season文件夹）回到父目录（视频根目录）
                         base_path
                             .parent()
@@ -4734,9 +4726,11 @@ pub async fn download_video_pages(
                 separate_status[0] && bangumi_folder_path.is_some() && should_download_bangumi_poster
             } else {
                 // 普通视频：为多P视频或启用Season结构的合集生成封面，并检查文件是否已存在
-                separate_status[0]
-                    && (!is_single_page || (is_collection && collection_use_season_structure))
-                    && should_download_season_poster
+                (separate_status[0] || should_backfill_collection_root_assets)
+                    && (!is_single_page
+                        || split_chapters_use_season_structure
+                        || (is_collection && collection_use_season_structure))
+                    && (should_download_season_poster || should_backfill_collection_root_assets)
             },
             &video_model,
             downloader,
@@ -4756,10 +4750,7 @@ pub async fn download_video_pages(
                 }
             } else {
                 // 多P视频或合集使用Season结构时，封面放在视频根目录
-                let config = crate::config::reload_config();
-                if (!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-                    || (is_collection && collection_use_season_structure && season_folder.is_some())
-                {
+                if multi_page_like_use_season_structure || collection_use_root_season_structure {
                     // 需要从base_path（Season文件夹）回到父目录（视频根目录）
                     base_path
                         .parent()
@@ -4786,10 +4777,7 @@ pub async fn download_video_pages(
                 }
             } else {
                 // 多P视频或合集使用Season结构时，fanart放在视频根目录
-                let config = crate::config::reload_config();
-                if (!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-                    || (is_collection && collection_use_season_structure && season_folder.is_some())
-                {
+                if multi_page_like_use_season_structure || collection_use_root_season_structure {
                     // 需要从base_path（Season文件夹）回到父目录（视频根目录）
                     base_path
                         .parent()
@@ -4853,16 +4841,14 @@ pub async fn download_video_pages(
         // 下载番剧/多P/合集根目录的 poster.jpg（Emby兼容性）
         fetch_bangumi_poster(
             {
-                let config = crate::config::reload_config();
                 if is_bangumi && bangumi_folder_path.is_some() {
                     // 番剧：无论是否启用Season结构都下载
                     should_download_bangumi_poster
                 } else {
                     // 多P视频或合集：启用Season结构时才下载根目录封面
-                    separate_status[0]
-                        && ((!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-                            || (is_collection && collection_use_season_structure && season_folder.is_some()))
-                        && should_download_season_poster
+                    (separate_status[0] || should_backfill_collection_root_assets)
+                        && (multi_page_like_use_season_structure || collection_use_root_season_structure)
+                        && (should_download_season_poster || should_backfill_collection_root_assets)
                 }
             },
             &video_model,
@@ -4872,10 +4858,7 @@ pub async fn download_video_pages(
                 bangumi_folder_path.as_ref().unwrap().join("poster.jpg")
             } else {
                 // 多P视频或合集根目录的 poster.jpg
-                let config = crate::config::reload_config();
-                if (!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-                    || (is_collection && collection_use_season_structure && season_folder.is_some())
-                {
+                if multi_page_like_use_season_structure || collection_use_root_season_structure {
                     base_path
                         .parent()
                         .map(|parent| parent.join("poster.jpg"))
@@ -4911,16 +4894,14 @@ pub async fn download_video_pages(
         // 下载番剧/多P/合集根目录的 folder.jpg（Emby兼容性，优先级最高）
         fetch_bangumi_poster(
             {
-                let config = crate::config::reload_config();
                 if is_bangumi && bangumi_folder_path.is_some() {
                     // 番剧：无论是否启用Season结构都下载
                     should_download_bangumi_poster
                 } else {
                     // 多P视频或合集：启用Season结构时才下载根目录封面
-                    separate_status[0]
-                        && ((!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-                            || (is_collection && collection_use_season_structure && season_folder.is_some()))
-                        && should_download_season_poster
+                    (separate_status[0] || should_backfill_collection_root_assets)
+                        && (multi_page_like_use_season_structure || collection_use_root_season_structure)
+                        && (should_download_season_poster || should_backfill_collection_root_assets)
                 }
             },
             &video_model,
@@ -4930,10 +4911,7 @@ pub async fn download_video_pages(
                 bangumi_folder_path.as_ref().unwrap().join("folder.jpg")
             } else {
                 // 多P视频或合集根目录的 folder.jpg
-                let config = crate::config::reload_config();
-                if (!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-                    || (is_collection && collection_use_season_structure && season_folder.is_some())
-                {
+                if multi_page_like_use_season_structure || collection_use_root_season_structure {
                     base_path
                         .parent()
                         .map(|parent| parent.join("folder.jpg"))
@@ -6870,6 +6848,7 @@ async fn download_page(
                         &outcome.files,
                         &poster_path_for_chapters,
                         fanart_path_for_chapters.as_deref(),
+                        &danmaku_path_for_chapters,
                     )
                     .await
                 } else {
@@ -8201,11 +8180,165 @@ async fn generate_chapter_movie_nfo(video_model: &video::Model, chapter_file: &C
     generate_nfo(NFO::Movie(movie), chapter_file.path.with_extension("nfo")).await
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AssDialogueFormat {
+    start_index: usize,
+    end_index: usize,
+    column_count: usize,
+}
+
+impl Default for AssDialogueFormat {
+    fn default() -> Self {
+        Self {
+            start_index: 1,
+            end_index: 2,
+            column_count: 10,
+        }
+    }
+}
+
+fn parse_ass_dialogue_format(line: &str) -> Option<AssDialogueFormat> {
+    let trimmed = line.trim_start();
+    let (prefix, value) = trimmed.split_once(':')?;
+    if !prefix.eq_ignore_ascii_case("format") {
+        return None;
+    }
+
+    let columns = value
+        .split(',')
+        .map(|column| column.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let start_index = columns.iter().position(|column| column == "start")?;
+    let end_index = columns.iter().position(|column| column == "end")?;
+    Some(AssDialogueFormat {
+        start_index,
+        end_index,
+        column_count: columns.len().max(1),
+    })
+}
+
+fn parse_ass_time(value: &str) -> Option<f64> {
+    let mut parts = value.trim().split(':');
+    let hours = parts.next()?.parse::<f64>().ok()?;
+    let minutes = parts.next()?.parse::<f64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
+}
+
+fn format_ass_time(seconds: f64) -> String {
+    let total_centiseconds = (seconds.max(0.0) * 100.0).round() as u64;
+    let hours = total_centiseconds / 360_000;
+    let minutes = (total_centiseconds % 360_000) / 6_000;
+    let seconds = (total_centiseconds % 6_000) / 100;
+    let centiseconds = total_centiseconds % 100;
+    format!("{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}")
+}
+
+fn adjust_ass_dialogue_line(
+    line: &str,
+    format: AssDialogueFormat,
+    chapter_start_seconds: f64,
+    chapter_end_seconds: f64,
+) -> Option<String> {
+    let leading_len = line.len().saturating_sub(line.trim_start().len());
+    let leading = &line[..leading_len];
+    let trimmed = &line[leading_len..];
+    let (prefix, value) = trimmed.split_once(':')?;
+    if !prefix.eq_ignore_ascii_case("dialogue") {
+        return None;
+    }
+
+    let minimum_columns = format
+        .column_count
+        .max(format.start_index.saturating_add(1))
+        .max(format.end_index.saturating_add(1));
+    let mut columns = value
+        .trim_start()
+        .splitn(minimum_columns, ',')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if columns.len() <= format.start_index || columns.len() <= format.end_index {
+        return None;
+    }
+
+    let start = parse_ass_time(&columns[format.start_index])?;
+    let end = parse_ass_time(&columns[format.end_index]).unwrap_or(start + 0.01);
+    if end <= chapter_start_seconds || start >= chapter_end_seconds {
+        return None;
+    }
+
+    let adjusted_start = (start - chapter_start_seconds).max(0.0);
+    let adjusted_end = (end.min(chapter_end_seconds) - chapter_start_seconds).max(adjusted_start + 0.01);
+    columns[format.start_index] = format_ass_time(adjusted_start);
+    columns[format.end_index] = format_ass_time(adjusted_end);
+
+    Some(format!("{leading}Dialogue: {}", columns.join(",")))
+}
+
+fn build_chapter_ass_content(source: &str, chapter_file: &ChapterFileOutput) -> String {
+    let chapter_start_seconds = f64::from(chapter_file.chapter.from);
+    let chapter_end_seconds = f64::from(chapter_file.chapter.to);
+    let mut dialogue_format = AssDialogueFormat::default();
+    let mut output = String::with_capacity(source.len());
+
+    for line in source.lines() {
+        if let Some(format) = parse_ass_dialogue_format(line) {
+            dialogue_format = format;
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+
+        if line
+            .trim_start()
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("dialogue:"))
+        {
+            if let Some(adjusted) =
+                adjust_ass_dialogue_line(line, dialogue_format, chapter_start_seconds, chapter_end_seconds)
+            {
+                output.push_str(&adjusted);
+                output.push('\n');
+            }
+            continue;
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    output
+}
+
+async fn write_chapter_danmaku_if_exists(danmaku_path: &Path, chapter_file: &ChapterFileOutput) -> Result<bool> {
+    match fs::metadata(danmaku_path).await {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
+        Ok(_) => return Ok(false),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    }
+
+    let source = fs::read_to_string(danmaku_path)
+        .await
+        .with_context(|| format!("读取原始章节弹幕失败: {}", danmaku_path.display()))?;
+    let content = build_chapter_ass_content(&source, chapter_file);
+    let target = chapter_file.path.with_extension("zh-CN.default.ass");
+    ensure_parent_dir_for_file(&target).await?;
+    fs::write(&target, content)
+        .await
+        .with_context(|| format!("写入章节弹幕失败: {}", target.display()))?;
+    Ok(true)
+}
+
 async fn write_chapter_sidecars(
     video_model: &video::Model,
     chapter_files: &[ChapterFileOutput],
     poster_path: &Path,
     fanart_path: Option<&Path>,
+    danmaku_path: &Path,
 ) -> Result<()> {
     for chapter_file in chapter_files {
         generate_chapter_movie_nfo(video_model, chapter_file).await?;
@@ -8221,6 +8354,8 @@ async fn write_chapter_sidecars(
         if !fanart_copied && poster_copied {
             let _ = copy_file_if_exists(&chapter_thumb_path, &chapter_fanart_path).await?;
         }
+
+        let _ = write_chapter_danmaku_if_exists(danmaku_path, chapter_file).await?;
     }
 
     Ok(())
