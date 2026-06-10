@@ -3237,6 +3237,10 @@ pub async fn download_video_pages(
 
     // 平铺目录模式（不为单个视频/季度创建子文件夹）
     let flat_folder = video_source.flat_folder();
+    let split_chapters_use_season_structure = !flat_folder
+        && video_source.split_chapters_after_download()
+        && final_video_model.single_page.unwrap_or(true)
+        && crate::config::reload_config().multi_page_use_season_structure;
 
     // 获取番剧源和季度信息
     let (base_path, season_folder, bangumi_folder_path) = if is_bangumi {
@@ -3597,6 +3601,7 @@ pub async fn download_video_pages(
 
         if !flat_folder
             && ((!is_single_page && config.multi_page_use_season_structure)
+                || split_chapters_use_season_structure
                 || (is_collection_source && collection_use_season_structure)
                 || submission_collection_use_season
                 || submission_force_season_structure)
@@ -3719,6 +3724,7 @@ pub async fn download_video_pages(
             base_path.to_string_lossy().to_string()
         }
     } else if (!is_single_page && current_config.multi_page_use_season_structure && season_folder.is_some())
+        || (split_chapters_use_season_structure && season_folder.is_some())
         || (is_collection && collection_use_season_structure && season_folder.is_some())
     {
         // 对于多P视频或合集使用Season结构时，保存根目录路径而不是Season子文件夹路径
@@ -6836,6 +6842,8 @@ async fn download_page(
 
     let mut chapter_primary_path: Option<PathBuf> = None;
     let should_write_chapter_sidecars = !(audio_only && video_source.audio_only_m4a_only());
+    let split_chapters_use_multi_page_template =
+        !is_bangumi && !video_source.flat_folder() && crate::config::reload_config().multi_page_use_season_structure;
     if video_source.split_chapters_after_download()
         && is_single_page
         && !is_charge_video_locked(video_model)
@@ -6844,7 +6852,17 @@ async fn download_page(
         && video_path.exists()
     {
         let bili_video = Video::new(bili_client, video_model.bvid.clone());
-        match split_page_chapters_after_download(&bili_video, &page_info, &video_path, token.clone()).await {
+        match split_page_chapters_after_download(
+            &bili_video,
+            video_model,
+            &page_model,
+            &page_info,
+            &video_path,
+            split_chapters_use_multi_page_template,
+            token.clone(),
+        )
+        .await
+        {
             Ok(Some(outcome)) if !outcome.files.is_empty() => {
                 let sidecar_result = if should_write_chapter_sidecars {
                     write_chapter_sidecars(
@@ -7873,23 +7891,52 @@ fn chapter_title(chapter: &VideoChapter, index: usize) -> String {
     }
 }
 
-fn chapter_output_path(page_path: &Path, chapter: &VideoChapter, index: usize) -> Result<PathBuf> {
+fn chapter_output_path(
+    video_model: &video::Model,
+    source_page: &page::Model,
+    page_path: &Path,
+    chapter: &VideoChapter,
+    index: usize,
+    duration_seconds: u32,
+    use_multi_page_template: bool,
+) -> Result<PathBuf> {
     let parent = page_path.parent().unwrap_or_else(|| Path::new("."));
+    let ext = page_path.extension().and_then(|value| value.to_str()).unwrap_or("mp4");
+    let chapter_name = chapter_title(chapter, index);
+
+    if use_multi_page_template {
+        let mut chapter_video = video_model.clone();
+        chapter_video.single_page = Some(false);
+
+        let mut chapter_page = source_page.clone();
+        chapter_page.pid = i32::try_from(index + 1).context("chapter index exceeds i32 range")?;
+        chapter_page.name = chapter_display_title(chapter, index);
+        chapter_page.duration = duration_seconds;
+
+        let rendered = crate::config::with_config(|bundle| {
+            bundle.render_multi_page_template(&page_format_args(&chapter_video, &chapter_page))
+        })
+        .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
+
+        return Ok(parent.join(format!("{rendered}.{ext}")));
+    }
+
     let stem = page_path
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("video");
-    let ext = page_path.extension().and_then(|value| value.to_str()).unwrap_or("mp4");
-    let chapter_name = chapter_title(chapter, index);
 
     Ok(parent.join(format!("{stem} - {:02} - {}.{}", index + 1, chapter_name, ext)))
 }
 
 async fn split_page_chapters_after_download(
     bili_video: &Video<'_>,
+    video_model: &video::Model,
+    source_page: &page::Model,
     page_info: &PageInfo,
     page_path: &Path,
+    use_multi_page_template: bool,
     token: CancellationToken,
 ) -> Result<Option<ChapterSplitOutcome>> {
     if !page_path.exists() {
@@ -7954,7 +8001,17 @@ async fn split_page_chapters_after_download(
 
     let output_paths = valid_chapters
         .iter()
-        .map(|(index, chapter, _)| chapter_output_path(page_path, chapter, *index))
+        .map(|(index, chapter, duration_seconds)| {
+            chapter_output_path(
+                video_model,
+                source_page,
+                page_path,
+                chapter,
+                *index,
+                *duration_seconds,
+                use_multi_page_template,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
 
     if token.is_cancelled() {
