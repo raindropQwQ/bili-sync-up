@@ -164,6 +164,16 @@ export interface ResetAllVideosResponse {
 	resetted_pages_count: number;
 }
 
+export interface RetryChargeVideosResponse {
+	success: boolean;
+	source_id: number;
+	source_type: string;
+	resetted: boolean;
+	resetted_videos_count: number;
+	resetted_pages_count: number;
+	message: string;
+}
+
 // 错误类型枚举
 export enum ErrorType {
 	Network = 'Network',

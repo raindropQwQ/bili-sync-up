@@ -43,6 +43,7 @@
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
 	import SubtitlesIcon from '@lucide/svelte/icons/subtitles';
 	import ActivityIcon from '@lucide/svelte/icons/activity';
+	import BatteryChargingIcon from '@lucide/svelte/icons/battery-charging';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
@@ -71,6 +72,7 @@
 	// 批量操作状态（按分类）
 	let bulkModeSections: Record<string, boolean> = {};
 	let bulkSelectedIds: Record<string, Set<number>> = {};
+	let retryingChargeVideoSources = new Set<string>();
 
 	// 删除对话框状态
 	let showDeleteDialog = false;
@@ -541,6 +543,37 @@
 			currentPath: currentPath
 		};
 		showResetPathDialog = true;
+	}
+
+	async function handleRetryChargeVideos(sourceId: number) {
+		const key = `submission:${sourceId}`;
+		if (retryingChargeVideoSources.has(key)) return;
+
+		retryingChargeVideoSources = new Set(retryingChargeVideoSources).add(key);
+		try {
+			const result = await runRequest(() => api.retryChargeVideosForSource('submission', sourceId), {
+				context: '重试充电视频失败'
+			});
+			if (!result) return;
+
+			const data = result.data;
+			if (!data.success) {
+				toast.error('重试充电视频失败', { description: data.message });
+				return;
+			}
+
+			if (data.resetted) {
+				toast.success('已重置充电视频', {
+					description: `已重置 ${data.resetted_videos_count} 个视频、${data.resetted_pages_count} 个分页，后续由现有下载流程重试`
+				});
+			} else {
+				toast.info('该 UP 投稿源没有可重试的充电视频');
+			}
+		} finally {
+			const next = new Set(retryingChargeVideoSources);
+			next.delete(key);
+			retryingChargeVideoSources = next;
+		}
 	}
 
 	// 切换扫描已删除视频设置
@@ -1427,6 +1460,21 @@
 															class="h-4 w-4 {source.use_dynamic_api
 																? 'text-blue-600'
 																: 'text-gray-400'}"
+														/>
+													</Button>
+
+													<Button
+														size="sm"
+														variant="ghost"
+														onclick={() => handleRetryChargeVideos(source.id)}
+														disabled={retryingChargeVideoSources.has(`submission:${source.id}`)}
+														title="重试充电视频"
+														class="h-8 w-8 p-0"
+													>
+														<BatteryChargingIcon
+															class="h-4 w-4 {retryingChargeVideoSources.has(`submission:${source.id}`)
+																? 'text-gray-400'
+																: 'text-pink-600'}"
 														/>
 													</Button>
 												{/if}

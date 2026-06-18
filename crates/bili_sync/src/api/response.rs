@@ -79,6 +79,17 @@ pub struct ResetAllVideosResponse {
     pub resetted_pages_count: usize,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RetryChargeVideosResponse {
+    pub success: bool,
+    pub source_id: i32,
+    pub source_type: String,
+    pub resetted: bool,
+    pub resetted_videos_count: usize,
+    pub resetted_pages_count: usize,
+    pub message: String,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct AddVideoSourceResponse {
     pub success: bool,

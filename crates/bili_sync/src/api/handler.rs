@@ -43,9 +43,9 @@ use crate::api::response::{
     DeleteVideoResponse, DeleteVideoSourceResponse, FilenamePreviewFile, FilenamePreviewItem, FilenamePreviewResponse,
     HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
     QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
-    SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
-    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse,
-    VideosResponse,
+    RetryChargeVideosResponse, SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse,
+    UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag,
+    VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -56,6 +56,8 @@ use crate::utils::model::{is_video_file_size_backfill_pending, queue_video_file_
 use crate::utils::status::{
     PageStatus, VideoStatus, PAGE_STATUS_NFO_INDEX, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_PAGE_DOWNLOAD_INDEX,
 };
+
+const PAGE_STATUS_VIDEO_INDEX: usize = 1;
 
 // 全局静态的扫码登录服务实例
 use once_cell::sync::Lazy;
@@ -1205,6 +1207,7 @@ mod reset_path_tests {
 #[cfg(test)]
 mod queue_sse_tests {
     use super::*;
+    use crate::utils::status::STATUS_OK;
     use axum::routing::get;
     use axum::Router;
     use bili_sync_migration::{Migrator, MigratorTrait};
@@ -1415,6 +1418,115 @@ mod queue_sse_tests {
         .expect("应能插入测试分页");
 
         file_path
+    }
+
+    async fn insert_retry_charge_test_video(
+        db: &DatabaseConnection,
+        id: i32,
+        submission_id: i32,
+        is_charge_video: bool,
+        auto_download: bool,
+    ) {
+        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
+        let completed_status: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(submission_id)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(2000 + i64::from(id)),
+            upper_name: Set(format!("测试UP{submission_id}")),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(format!("测试视频{id}")),
+            path: Set(format!("/tmp/video-{id}")),
+            category: Set(1),
+            bvid: Set(format!("BV{id:010}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(test_time),
+            pubtime: Set(test_time),
+            favtime: Set(test_time),
+            download_status: Set(completed_status),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(auto_download),
+            cid: Set(None),
+            is_charge_video: Set(is_charge_video),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入充电视频重试测试视频");
+    }
+
+    async fn insert_retry_charge_test_page(db: &DatabaseConnection, id: i32, video_id: i32) {
+        let completed_status: u32 = PageStatus::from([STATUS_OK; 5]).into();
+
+        page::ActiveModel {
+            id: Set(id),
+            video_id: Set(video_id),
+            cid: Set(900_000 + i64::from(id)),
+            pid: Set(1),
+            name: Set(format!("P{id}")),
+            width: Set(Some(1920)),
+            height: Set(Some(1080)),
+            duration: Set(60),
+            path: Set(Some(format!("/tmp/page-{id}.mp4"))),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(completed_status),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: sea_orm::ActiveValue::NotSet,
+        }
+        .insert(db)
+        .await
+        .expect("应能插入充电视频重试测试分页");
+    }
+
+    async fn setup_retry_charge_video_test_db() -> Arc<DatabaseConnection> {
+        let db = create_test_db("retry-charge-videos").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源一").await;
+        insert_test_submission(db.as_ref(), 2, "测试投稿源二").await;
+
+        insert_retry_charge_test_video(db.as_ref(), 1, 1, true, true).await;
+        insert_retry_charge_test_video(db.as_ref(), 2, 1, false, true).await;
+        insert_retry_charge_test_video(db.as_ref(), 3, 2, true, true).await;
+        insert_retry_charge_test_video(db.as_ref(), 4, 1, true, false).await;
+        insert_retry_charge_test_page(db.as_ref(), 1, 1).await;
+        insert_retry_charge_test_page(db.as_ref(), 2, 2).await;
+        insert_retry_charge_test_page(db.as_ref(), 3, 3).await;
+        insert_retry_charge_test_page(db.as_ref(), 4, 4).await;
+
+        db
     }
 
     #[tokio::test]
@@ -1701,6 +1813,74 @@ mod queue_sse_tests {
         assert!(submission.scan_deleted_videos_once);
     }
 
+    #[tokio::test]
+    async fn retry_charge_videos_for_submission_resets_only_matching_charge_videos() {
+        let db = setup_retry_charge_video_test_db().await;
+
+        let response = retry_charge_videos_for_source_internal(db.clone(), "submission".to_string(), 1)
+            .await
+            .expect("应能重试投稿源充电视频");
+
+        assert!(response.success);
+        assert!(response.resetted);
+        assert_eq!(response.resetted_videos_count, 1);
+        assert_eq!(response.resetted_pages_count, 1);
+
+        let charge_video = video::Entity::find_by_id(1).one(db.as_ref()).await.unwrap().unwrap();
+        let normal_video = video::Entity::find_by_id(2).one(db.as_ref()).await.unwrap().unwrap();
+        let other_charge_video = video::Entity::find_by_id(3).one(db.as_ref()).await.unwrap().unwrap();
+        let not_auto_charge_video = video::Entity::find_by_id(4).one(db.as_ref()).await.unwrap().unwrap();
+        let charge_page = page::Entity::find_by_id(1).one(db.as_ref()).await.unwrap().unwrap();
+        let normal_page = page::Entity::find_by_id(2).one(db.as_ref()).await.unwrap().unwrap();
+        let other_charge_page = page::Entity::find_by_id(3).one(db.as_ref()).await.unwrap().unwrap();
+        let not_auto_charge_page = page::Entity::find_by_id(4).one(db.as_ref()).await.unwrap().unwrap();
+
+        assert_eq!(
+            VideoStatus::from(charge_video.download_status).get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX),
+            0
+        );
+        assert_eq!(
+            PageStatus::from(charge_page.download_status).get(PAGE_STATUS_VIDEO_INDEX),
+            0
+        );
+        assert_eq!(
+            VideoStatus::from(normal_video.download_status).get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX),
+            STATUS_OK
+        );
+        assert_eq!(
+            PageStatus::from(normal_page.download_status).get(PAGE_STATUS_VIDEO_INDEX),
+            STATUS_OK
+        );
+        assert_eq!(
+            VideoStatus::from(other_charge_video.download_status).get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX),
+            STATUS_OK
+        );
+        assert_eq!(
+            PageStatus::from(other_charge_page.download_status).get(PAGE_STATUS_VIDEO_INDEX),
+            STATUS_OK
+        );
+        assert_eq!(
+            VideoStatus::from(not_auto_charge_video.download_status).get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX),
+            STATUS_OK
+        );
+        assert_eq!(
+            PageStatus::from(not_auto_charge_page.download_status).get(PAGE_STATUS_VIDEO_INDEX),
+            STATUS_OK
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_charge_videos_rejects_non_submission_sources() {
+        let db = setup_retry_charge_video_test_db().await;
+
+        let error = match retry_charge_videos_for_source_internal(db, "favorite".to_string(), 1).await {
+            Ok(_) => panic!("非投稿源不应支持重试充电视频"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:?}").contains("仅支持UP投稿源"));
+    }
+
     #[test]
     fn test_normalize_video_source_latest_row_at_filters_initial_value() {
         assert_eq!(normalize_video_source_latest_row_at(""), None);
@@ -1714,7 +1894,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -6846,6 +7026,130 @@ pub async fn update_video_source_scan_deleted_once(
     update_video_source_scan_deleted_internal(db, source_type, id, None, params.scan_deleted_videos_once)
         .await
         .map(ApiResponse::ok)
+}
+
+/// 重试 UP 投稿源下已识别的充电视频
+#[utoipa::path(
+    post,
+    path = "/api/video-sources/{source_type}/{id}/retry-charge-videos",
+    params(
+        ("source_type" = String, Path, description = "视频源类型，仅支持 submission"),
+        ("id" = i32, Path, description = "视频源ID"),
+    ),
+    responses(
+        (status = 200, body = ApiResponse<RetryChargeVideosResponse>),
+    )
+)]
+pub async fn retry_charge_videos_for_source(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path((source_type, id)): Path<(String, i32)>,
+) -> Result<ApiResponse<RetryChargeVideosResponse>, ApiError> {
+    retry_charge_videos_for_source_internal(db, source_type, id)
+        .await
+        .map(ApiResponse::ok)
+}
+
+pub async fn retry_charge_videos_for_source_internal(
+    db: Arc<DatabaseConnection>,
+    source_type: String,
+    id: i32,
+) -> Result<RetryChargeVideosResponse, ApiError> {
+    if source_type != "submission" {
+        return Err(anyhow!("仅支持UP投稿源重试充电视频").into());
+    }
+
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.retry_charge_videos_for_source").await?;
+
+    let submission = submission::Entity::find_by_id(id)
+        .one(&txn)
+        .await?
+        .ok_or_else(|| anyhow!("未找到指定的UP主投稿"))?;
+
+    let charge_videos = video::Entity::find()
+        .filter(video::Column::SubmissionId.eq(id))
+        .filter(video::Column::Valid.eq(true))
+        .filter(video::Column::Deleted.eq(0))
+        .filter(video::Column::AutoDownload.eq(true))
+        .filter(video::Column::IsChargeVideo.eq(true))
+        .all(&txn)
+        .await?;
+
+    let selected_video_ids = charge_videos.iter().map(|video| video.id).collect::<Vec<_>>();
+    let charge_pages = if selected_video_ids.is_empty() {
+        Vec::new()
+    } else {
+        page::Entity::find()
+            .filter(page::Column::VideoId.is_in(selected_video_ids))
+            .all(&txn)
+            .await?
+    };
+
+    let mut resetted_videos = Vec::new();
+    for video_model in charge_videos {
+        let mut status = VideoStatus::from(video_model.download_status);
+        if status.get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX) != 0 {
+            status.set(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX, 0);
+            resetted_videos.push((video_model.id, status));
+        }
+    }
+
+    let mut resetted_pages = Vec::new();
+    for page_model in charge_pages {
+        let mut status = PageStatus::from(page_model.download_status);
+        if status.get(PAGE_STATUS_VIDEO_INDEX) != 0 {
+            status.set(PAGE_STATUS_VIDEO_INDEX, 0);
+            resetted_pages.push((page_model.id, status));
+        }
+    }
+
+    for (video_id, status) in &resetted_videos {
+        video::Entity::update(video::ActiveModel {
+            id: sea_orm::ActiveValue::Unchanged(*video_id),
+            download_status: Set((*status).into()),
+            ..Default::default()
+        })
+        .exec(&txn)
+        .await?;
+    }
+
+    for (page_id, status) in &resetted_pages {
+        page::Entity::update(page::ActiveModel {
+            id: sea_orm::ActiveValue::Unchanged(*page_id),
+            download_status: Set((*status).into()),
+            ..Default::default()
+        })
+        .exec(&txn)
+        .await?;
+    }
+
+    let resetted_videos_count = resetted_videos.len();
+    let resetted_pages_count = resetted_pages.len();
+    let resetted = resetted_videos_count > 0 || resetted_pages_count > 0;
+
+    txn.commit().await?;
+
+    if resetted {
+        notify_videos_changed();
+    }
+
+    let message = if resetted {
+        format!(
+            "UP主投稿 {} 已重置 {} 个充电视频、{} 个分页，将在后续扫描中重试",
+            submission.upper_name, resetted_videos_count, resetted_pages_count
+        )
+    } else {
+        format!("UP主投稿 {} 没有可重试的充电视频", submission.upper_name)
+    };
+
+    Ok(RetryChargeVideosResponse {
+        success: true,
+        source_id: id,
+        source_type,
+        resetted,
+        resetted_videos_count,
+        resetted_pages_count,
+        message,
+    })
 }
 
 fn resolve_scan_deleted_modes(
