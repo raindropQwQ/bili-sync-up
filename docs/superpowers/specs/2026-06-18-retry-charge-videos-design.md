@@ -1,74 +1,74 @@
-# Source-Level Retry for Charge Videos
+# 源级充电视频重试设计
 
-## Goal
+## 目标
 
-Add a manual source-level action that retries already-known charge videos for a single video source. The action should not periodically scan all sources and should not pre-check charge entitlement. It should simply place that source's existing charge videos back into the normal download pipeline.
+增加一个手动的源级操作，用来重试某个视频源里已经识别到的充电视频。这个功能不做定期全源扫描，也不在按钮点击时预先检查是否已经充电。按钮只负责把当前视频源里的充电视频重新放回现有下载流程。
 
-## Scope
+## 范围
 
-- Add a button on each video source card: "重试充电视频".
-- Add a backend endpoint for the button:
-  `POST /api/video-sources/{source_type}/{id}/retry-charge-videos`.
-- Only affect videos belonging to the selected source.
-- Only affect videos where `is_charge_video = true`.
-- Preserve the existing download behavior:
-  - if the account can now play the charge video, the normal download logic downloads real media;
-  - if the account still cannot play it, the existing placeholder logic keeps or recreates the placeholder.
+- 在每个视频源卡片上增加一个按钮：`重试充电视频`。
+- 新增后端接口：
+  `POST /api/video-sources/{source_type}/{id}/retry-charge-videos`。
+- 只影响当前选中的视频源。
+- 只影响 `is_charge_video = true` 的视频。
+- 保留现有下载行为：
+  - 如果账号现在已经有权限播放该充电视频，正常下载逻辑会下载真实媒体文件；
+  - 如果账号仍然没有权限播放，现有占位逻辑继续保留或重新创建占位文件。
 
-## Backend Design
+## 后端设计
 
-The endpoint resolves `{source_type, id}` to the same source filter expressions used by existing source actions. It queries matching videos where:
+接口根据 `{source_type, id}` 复用现有视频源操作里的过滤逻辑，找到当前源下满足以下条件的视频：
 
 - `valid = true`
 - `deleted = 0`
 - `auto_download = true`
 - `is_charge_video = true`
 
-For matched videos, it resets only the work needed to retry media download:
+对匹配到的视频，只重置“重新尝试媒体下载”需要的状态：
 
-- video-level page-download status is set back to pending;
-- page-level video-content download status is set back to pending;
-- `auto_download` remains true;
-- `valid` remains true.
+- 视频级的“分页下载”状态重置为待执行；
+- 分页级的“视频内容下载”状态重置为待执行；
+- `auto_download` 保持为 true；
+- `valid` 保持为 true。
 
-The endpoint returns:
+接口返回：
 
-- whether anything was reset;
-- number of videos reset;
-- number of pages reset;
-- a user-facing message.
+- 是否有内容被重置；
+- 重置了多少个视频；
+- 重置了多少个分页；
+- 一条给前端展示的消息。
 
-If at least one video or page was reset, the endpoint triggers an immediate scan using the existing task controller, so the current downloader pipeline handles the actual retry.
+如果至少重置了一个视频或分页，接口会触发一次立即扫描，让现有下载管线处理后续重试。
 
-## Frontend Design
+## 前端设计
 
-The video source page adds a compact source action button using the existing button style and lucide icon pattern. The action:
+视频源页面在源卡片操作区增加一个紧凑按钮，沿用现有按钮样式和 lucide 图标模式。点击后：
 
-- calls the new API method;
-- disables itself while the request is in flight for that source;
-- shows a success toast with the reset counts;
-- shows the existing error toast flow if the API fails.
+- 调用新的 API 方法；
+- 请求期间只禁用当前源的该按钮；
+- 成功后用 toast 显示重置数量；
+- 失败时沿用现有请求错误提示流程。
 
-The button should be visible for source types that can contain charge videos. If the backend returns zero reset items, the toast says there are no charge videos to retry for that source.
+按钮对可能包含充电视频的源类型可见。如果后端返回重置数量为 0，toast 显示“该视频源没有可重试的充电视频”。
 
-## Error Handling
+## 错误处理
 
-- Unknown source type or missing source returns the same API error style as existing source endpoints.
-- If a scan is already running, the reset still happens and the normal scan loop will pick it up; if idle, the endpoint triggers a scan immediately.
-- The endpoint does not delete placeholder files. Existing download code decides whether to replace them.
+- 未知源类型或源不存在时，返回与现有视频源接口一致的 API 错误。
+- 如果当前正在扫描，仍然先完成状态重置，由现有扫描流程接手；如果当前空闲，则接口主动触发一次扫描。
+- 接口不删除占位文件。是否覆盖占位文件由现有下载逻辑决定。
 
-## Testing
+## 测试
 
-Backend tests cover:
+后端测试覆盖：
 
-- only the selected source is affected;
-- non-charge videos in the same source are unchanged;
-- charge videos in other sources are unchanged;
-- video page-download status and page video-content status are reset;
-- response counts are correct.
+- 只影响当前选中的视频源；
+- 同一视频源里的普通视频不变；
+- 其他视频源里的充电视频不变；
+- 视频级“分页下载”状态和分页级“视频内容下载”状态会被重置；
+- 接口返回的计数正确。
 
-Frontend verification covers:
+前端验证覆盖：
 
-- button renders in source card actions;
-- clicking it calls the new API method;
-- success and zero-count messages are shown.
+- 源卡片操作区会显示按钮；
+- 点击按钮会调用新的 API 方法；
+- 成功和零重置数量都有明确提示。
