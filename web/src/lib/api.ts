@@ -31,6 +31,7 @@ import type {
 	UpdateVideoSourceScanDeletedResponse,
 	ResetVideoSourcePathRequest,
 	ResetVideoSourcePathResponse,
+	RetryChargeVideosResponse,
 	UpdateSubmissionSelectedVideosResponse,
 	UpdateKeywordFiltersResponse,
 	GetKeywordFiltersResponse,
@@ -469,6 +470,20 @@ class ApiClient {
 		return this.post<ResetVideoSourcePathResponse>(
 			`/video-sources/${sourceType}/${id}/reset-path`,
 			params
+		);
+	}
+
+	/**
+	 * 重试视频源下已识别的充电视频
+	 * @param sourceType 视频源类型，支持除 bangumi 外的视频源
+	 * @param id 视频源ID
+	 */
+	async retryChargeVideosForSource(
+		sourceType: string,
+		id: number
+	): Promise<ApiResponse<RetryChargeVideosResponse>> {
+		return this.post<RetryChargeVideosResponse>(
+			`/video-sources/${sourceType}/${id}/retry-charge-videos`
 		);
 	}
 
@@ -1207,6 +1222,12 @@ export const api = {
 	 */
 	resetVideoSourcePath: (sourceType: string, id: number, params: ResetVideoSourcePathRequest) =>
 		apiClient.resetVideoSourcePath(sourceType, id, params),
+
+	/**
+	 * 重试 UP 投稿源下已识别的充电视频
+	 */
+	retryChargeVideosForSource: (sourceType: string, id: number) =>
+		apiClient.retryChargeVideosForSource(sourceType, id),
 
 	/**
 	 * 更新投稿源选中视频列表

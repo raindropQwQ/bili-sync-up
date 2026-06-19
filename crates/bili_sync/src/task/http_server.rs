@@ -75,6 +75,7 @@ use crate::api::handler::{
     reset_video,
     reset_video_source_path,
     resume_scanning_endpoint,
+    retry_charge_videos_for_source,
     search_bilibili,
     setup_auth_token,
     stream_logs,
@@ -183,6 +184,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route(
             "/api/video-sources/{source_type}/{id}/download-options",
             put(update_video_source_download_options),
+        )
+        .route(
+            "/api/video-sources/{source_type}/{id}/retry-charge-videos",
+            post(retry_charge_videos_for_source),
         )
         .route(
             "/api/video-sources/{source_type}/{id}/reset-path",
