@@ -3742,8 +3742,9 @@ async fn download_video_pages(
 
     let current_config = crate::config::reload_config();
     let collection_use_season_structure = current_config.collection_use_season_structure
-        || current_config.collection_folder_mode.as_ref() == "up_seasonal"
-        || collection_aggregate_enabled;
+        || collection_aggregate_enabled
+        || (current_config.collection_folder_mode.as_ref() == "up_seasonal"
+            && !matches!(video_source, VideoSourceEnum::Collection(_)));
     // 使用UP主昵称作为文件夹名，并使用首字进行分类
     let upper_name = crate::utils::filenamify::filenamify(&final_video_model.upper_name);
     if upper_name.is_empty() {
@@ -3834,7 +3835,8 @@ async fn download_video_pages(
         let config = crate::config::reload_config();
         let collection_like_use_season = config.collection_use_season_structure
             || collection_aggregate_enabled
-            || config.collection_folder_mode.as_ref() == "up_seasonal";
+            || (config.collection_folder_mode.as_ref() == "up_seasonal"
+                && !matches!(video_source, VideoSourceEnum::Collection(_)));
         if collection_like_use_season && season_folder.is_some() {
             // 合集启用Season结构时，使用合集名称作为文件名前缀
             match video_source {

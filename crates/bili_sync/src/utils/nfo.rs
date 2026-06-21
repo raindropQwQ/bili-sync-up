@@ -321,9 +321,10 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介
+                let movie_plot = Self::format_plot_with_bvid(movie.bvid, movie.intro);
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(movie.intro))
+                    .write_cdata_content_async(BytesCData::new(&movie_plot))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -693,9 +694,10 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介
+                let tvshow_plot = Self::format_plot_with_bvid(tvshow.bvid, tvshow.intro);
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(tvshow.intro))
+                    .write_cdata_content_async(BytesCData::new(&tvshow_plot))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -1049,14 +1051,11 @@ impl NFO<'_> {
                     .await?;
 
                 // 剧情简介
-                if let Some(plot) = episode.plot {
-                    writer
-                        .create_element("plot")
-                        .write_cdata_content_async(BytesCData::new(plot))
-                        .await?;
-                } else {
-                    writer.create_element("plot").write_empty_async().await?;
-                }
+                let episode_plot = Self::format_plot_with_bvid(episode.bvid, episode.plot.unwrap_or(""));
+                writer
+                    .create_element("plot")
+                    .write_cdata_content_async(BytesCData::new(&episode_plot))
+                    .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
                 // 季集信息
@@ -1410,7 +1409,7 @@ impl NFO<'_> {
 
                 // 剧情简介 - 为Season添加季度特定的前缀
                 let season_plot_base = season.intro.to_string();
-                let season_plot = if Self::is_bangumi_video(season.category) {
+                let season_plot_intro = if Self::is_bangumi_video(season.category) {
                     if let Some(season_title) = Self::extract_season_title_from_full_name(season.name) {
                         format!("【{}】{}", season_title, season_plot_base)
                     } else {
@@ -1419,9 +1418,10 @@ impl NFO<'_> {
                 } else {
                     season_plot_base
                 };
+                let season_plot = Self::format_plot_with_bvid(season.bvid, &season_plot_intro);
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(season_plot))
+                    .write_cdata_content_async(BytesCData::new(&season_plot))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -1854,6 +1854,16 @@ impl NFO<'_> {
         // 检查基本字段是否有效
         !name.trim().is_empty() && !bvid.trim().is_empty() && bvid.starts_with("BV") && bvid.len() >= 10
         // BV号最少10位
+    }
+
+    fn format_plot_with_bvid(bvid: &str, intro: &str) -> String {
+        let url = format!("https://www.bilibili.com/video/{}/", bvid);
+        let intro = intro.trim();
+        if intro.is_empty() {
+            url
+        } else {
+            format!("{}\n\n{}", url, intro)
+        }
     }
 
     /// 根据配置策略获取演员信息（返回演员名称和角色名称）
