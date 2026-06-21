@@ -1857,12 +1857,15 @@ impl NFO<'_> {
     }
 
     fn format_plot_with_bvid(bvid: &str, intro: &str) -> String {
-        let url = format!("https://www.bilibili.com/video/{}/", bvid);
+        let link = format!(
+            "原始视频：<a href=\"https://www.bilibili.com/video/{}/\">{}</a>",
+            bvid, bvid
+        );
         let intro = intro.trim();
         if intro.is_empty() {
-            url
+            link
         } else {
-            format!("{}\n\n{}", url, intro)
+            format!("{}<br/><br/>{}", link, intro)
         }
     }
 
